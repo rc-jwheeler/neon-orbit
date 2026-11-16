@@ -39,6 +39,9 @@
   h1 { margin:0 0 6px; font-size:40px; letter-spacing:3px; color:#fff; text-shadow:0 0 12px var(--cyan), 0 0 30px rgba(95,243,255,.5); }
   h2 { margin:0 0 6px; font-size:28px; color:#fff; text-shadow:0 0 12px var(--pink); }
   .overlay p { margin:5px 0; opacity:.85; line-height:1.45; max-width:340px; font-size:14px; }
+  #hint { position:absolute; left:50%; transform:translateX(-50%); bottom:calc(env(safe-area-inset-bottom) + 74px); width:min(340px, 92vw);
+    background:rgba(10,16,38,.95); border:1px solid rgba(95,243,255,.45); border-radius:16px; padding:12px 14px; font-size:14px; line-height:1.45; box-shadow:0 0 20px rgba(95,243,255,.25); }
+  #hint div { margin:3px 0; } #hint button { margin-top:8px; width:100%; height:42px; }
   .big { margin-top:16px; height:52px; padding:0 34px; font-size:18px; font-weight:700; border-radius:28px; border-color:var(--cyan); box-shadow:0 0 18px rgba(95,243,255,.4); }
 </style>
 </head>
@@ -52,6 +55,7 @@
 </div>
 <div class="bar" id="bot">
   <button id="btnBoost" title="Boost: then tap a line (or just tap a line)">⚡ 3</button>
+  <button id="btnShip" title="Ship token: tap, then tap a line to add a ship (max 3 per line)">🚀 0</button>
   <button id="btnStab" title="Stabilizer: then tap a phase station">❄ 2</button>
   <button id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
   <button id="btnDel" class="danger hide">✕ Delete line</button>
@@ -60,11 +64,18 @@
 <div id="toast"></div>
 <div class="overlay show" id="title">
   <h1>NEON ORBIT</h1>
-  <p>Link the stations with glowing conduits. Ships carry each pod to a station of the <b>same shape</b>.</p>
+  <p>Link the stations with glowing conduits. Ships carry each pod to a station of the <b>same colored shape</b>: <b style="color:#3ff2ff">● circle</b> <b style="color:#ff4fd8">■ square</b> <b style="color:#ffe14d">▲ triangle</b> <b style="color:#ff8a3d">◆ diamond</b>.</p>
   <p><b>Drag</b> station → station to draw a line. Drag a line's end knob to extend it. <b>Long-press</b> a line to delete it. The sim pauses while you edit.</p>
-  <p><b>Tap a line</b> to boost its energy ⚡. Dim lines are slow. Stations with a ring timer change shape; tap ❄ then one to freeze it.</p>
+  <p><b>Tap a station</b> to see where its pods will go. <b>Tap a line</b> to boost its energy ⚡. Earn 🚀 ship tokens and tap a line to add ships.</p>
+  <p>Dashed stations change shape on a timer; tap ❄ then one to freeze it.</p>
   <p>Too many pods waiting at one station for too long ends the run.</p>
   <button class="big" id="btnStart">Start</button>
+</div>
+<div id="hint" class="hide">
+  <div>👉 <b>Drag</b> from station to station to make a line.</div>
+  <div>📦 Pods ride to the <b>matching colored shape</b>.</div>
+  <div>🔍 <b>Tap a station</b> to see its pods' routes.</div>
+  <button id="btnHint">Got it</button>
 </div>
 <div class="overlay" id="over">
   <h2>Station overcrowded</h2>
@@ -76,14 +87,17 @@
 'use strict';
 // ---------- config ----------
 const STEP = 1 / 60, TAU = Math.PI * 2;
-const COLORS = ['#5ff3ff', '#ff6ad5', '#ffc66d', '#9dff8a', '#b18cff', '#ff8a5c', '#6fa8ff'];
+// Shape colors (pods + stations) are bright and warm/neon; line colors are a separate, cooler palette so the two never get confused.
+const SHAPE_COL = { circle: '#3ff2ff', square: '#ff4fd8', triangle: '#ffe14d', diamond: '#ff8a3d' };
+const COLORS = ['#8f7bff', '#4d84ff', '#cfd8e6', '#3ddc84', '#c49a6c', '#6aa0a0', '#a05ac8'];
 const OFFS = [0, -5, 5, -10, 10, -15, 15];               // parallel offset per line slot
 // Pacing (v1.1): slower station/pod spawns with a gentle ramp, half the energy drain + idle regen, longer overcrowd timer.
-const CFG = { short: 420, R: 16, cap: 8, overLimit: 25, shipCap: 6, speed: 72, maxStations: 18,
+const CFG = { short: 420, R: 16, cap: 8, overLimit: 25, shipCap: 6, speed: 72, maxStations: 22,
   stationStart: 30, stationMin: 18, stationRamp: 60,   // station interval: 30 s, shrinking 1 s per minute, floor 18 s
-  podMin: 10, podVar: 8, podRamp: 900, podFloor: .55,  // per-station pod interval (10-18 s) x max(.55, 1 - t/900)
+  podMin: 10, podVar: 8, podRamp: 300,             // per-station pod interval (10-18 s) x 1/(1 + t/300): keeps rising, no plateau
   drainBase: .0015, drainLen: .003, drainPod: .002, regen: .003, regenLoad: 2,   // energy per s; regen when ship carries <= 2 pods
-  warn: 3, freeze: 10, boostAmt: .5, baseLines: 5, maxLines: 7, linePer: 40, maxBoosts: 8, maxStabs: 4, boostRegen: 30, boostPer: 4, stabPer: 12 };
+  warn: 3, freeze: 10, boostAmt: .5, baseLines: 5, maxLines: 7, linePer: 40, maxBoosts: 8, maxStabs: 4, boostRegen: 30, boostPer: 4, stabPer: 12,
+  shipPer: 20, maxShipTokens: 5, maxShipsPerLine: 3, podR: 5.5 };
 const SPEEDS = [.5, 1, 2, 3], speedLabel = v => v === .5 ? 'Chill' : v + '×';
 let speedPref = +(localStorage.getItem('neonOrbit.speed') || .5); if (!SPEEDS.includes(speedPref)) speedPref = .5;
 const stationInterval = t => Math.max(CFG.stationMin, CFG.stationStart - t / CFG.stationRamp);
@@ -114,7 +128,7 @@ function newGame(seed) {
   G = { seed, rng: mulberry32(seed), tick: 0, t: 0, portrait, W: portrait ? CFG.short : CFG.short * long, H: portrait ? CFG.short * long : CFG.short,
     stations: [], byId: {}, lines: [], ships: [], stLines: {}, delivered: 0, boosts: 4, stabs: 2, nid: 100, lineSlots: CFG.baseLines,
     stationT: CFG.stationStart, regenT: CFG.boostRegen, over: false, undo: [], speed: speedPref, paused: false,
-    draw: null, sel: null, armed: null, flips: 0, repaths: 0, transfers: 0, fx: [] };
+    draw: null, sel: null, armed: null, flips: 0, repaths: 0, transfers: 0, pingpong: 0, fx: [], shipTokens: 0, costs: {}, focus: null, hover: null, hintOpen: false };
   addStation('circle', .5, .4); addStation('triangle', .28, .62); addStation('square', .72, .64);
   fit(); refreshRoutes();
 }
@@ -123,7 +137,7 @@ function addStation(shape, u, v, phase) {
   const p = uvToWorld(u, v);
   const st = { id: G.stations.length + 1, x: p.x, y: p.y, u, v, shape, pods: [], over: 0, podT: 3 + G.rng() * 4, phase: null, freeze: 0 };
   if (phase) { const period = 14 + Math.floor(G.rng() * 5); st.phase = { a: shape, b: phase, period, t: period }; }
-  G.stations.push(st); G.byId[st.id] = st; return st;
+  G.stations.push(st); G.byId[st.id] = st; G.costs = {}; return st;
 }
 function spawnStation() {
   const n = G.stations.length; let u, v, ok = false;
@@ -151,8 +165,10 @@ function setLines(defs) {
   G.lines = defs.map((d, i) => { const l = old[d.id] || { id: d.id, slot: d.slot, energy: d.energy ?? 1, flash: 0 }; l.stations = d.stations.slice(); l.idx = i; l.len = lineLen(l); return l; });
   const keep = new Set(G.lines.map(l => l.id));
   for (const sh of G.ships.slice()) {
-    if (!keep.has(sh.line.id)) {                 // line gone: drop cargo at the station it was heading to
-      const st = G.byId[sh.toId]; st.pods.push(...sh.pods); G.ships.splice(G.ships.indexOf(sh), 1); continue;
+    if (!keep.has(sh.line.id)) {                 // line gone: drop cargo at the station it was heading to; extra ships come back as tokens
+      const st = G.byId[sh.toId]; st.pods.push(...sh.pods); G.ships.splice(G.ships.indexOf(sh), 1);
+      if (sh.extra) G.shipTokens = Math.min(CFG.maxShipTokens, G.shipTokens + 1);
+      continue;
     }
     const s = sh.line.stations, i = s.indexOf(sh.toId), j = s.indexOf(sh.fromId);
     if (i < 0 || (sh.fromId !== sh.toId && (j < 0 || Math.abs(i - j) !== 1))) {   // segment removed: snap to nearest station on the line
@@ -163,7 +179,7 @@ function setLines(defs) {
   }
   for (const l of G.lines) if (!G.ships.some(sh => sh.line === l)) G.ships.push({ line: l, fromId: l.stations[0], toId: l.stations[0], d: 0, dwell: .4, pods: [] });
   G.stLines = {}; for (const l of G.lines) for (const id of l.stations) (G.stLines[id] ||= []).push(l);
-  refreshRoutes();
+  G.costs = {}; refreshRoutes();
 }
 function editLines(defs) { G.undo.push(lineDefs()); if (G.undo.length > 30) G.undo.shift(); setLines(defs); }
 function undo() {
@@ -175,22 +191,33 @@ function undo() {
 function freeSlot() { for (let i = 0; i < G.lineSlots; i++) if (!G.lines.some(l => l.slot === i)) return i; return -1; }
 
 // ---------- routing: Dijkstra over (station, line) states; line=null means waiting on the platform ----------
-// Returns the first hop {line, next} (or {alight}) and the destination station, or null if unreachable.
+// Costs: ride one stop = 1, board = .5, alight = 1.5 (so a transfer costs 2). Returns the first hop {line, next} (or {alight}),
+// the destination station, total cost and the station path, or null if unreachable.
 function route(sid, line, shape) {
-  const seen = new Set(), open = [[0, sid, line, null]];
+  const seen = new Set(), open = [[0, sid, line, null, [sid]]];
   while (open.length) {
     let bi = 0; for (let i = 1; i < open.length; i++) if (open[i][0] < open[bi][0]) bi = i;
-    const [c, s, l, fh] = open.splice(bi, 1)[0], key = s * 8 + (l ? l.idx + 1 : 0);
+    const [c, s, l, fh, path] = open.splice(bi, 1)[0], key = s * 8 + (l ? l.idx + 1 : 0);
     if (seen.has(key)) continue; seen.add(key);
-    if (l && fh && G.byId[s].shape === shape) return { ...fh, dest: s };
+    if (l && fh && G.byId[s].shape === shape) return { ...fh, dest: s, cost: c, path };
     if (l) {
       const i = l.stations.indexOf(s);
-      for (const k of [i - 1, i + 1]) if (k >= 0 && k < l.stations.length) open.push([c + 1, l.stations[k], l, fh || { line: l, next: l.stations[k] }]);
-      open.push([c + 1.5, s, null, fh || { alight: true }]);   // transfer penalty
-    } else for (const l2 of G.stLines[s] || []) open.push([c + .5, s, l2, fh]);
+      for (const k of [i - 1, i + 1]) if (k >= 0 && k < l.stations.length) open.push([c + 1, l.stations[k], l, fh || { line: l, next: l.stations[k] }, path.concat(l.stations[k])]);
+      open.push([c + 1.5, s, null, fh || { alight: true }, path]);   // transfer penalty
+    } else for (const l2 of G.stLines[s] || []) open.push([c + .5, s, l2, fh, path]);
   }
   return null;
 }
+// Remaining cost for a pod of `shape` standing on the platform at `sid` (0 if this station already matches). Cached per network state.
+function platCost(sid, shape) {
+  if (G.byId[sid].shape === shape) return 0;
+  const k = sid + shape;
+  if (!(k in G.costs)) { const r = route(sid, null, shape); G.costs[k] = r ? r.cost : Infinity; }
+  return G.costs[k];
+}
+// Stops a ship at `atId` heading to `nextId` will still visit before it reverses.
+function onward(l, atId, nextId) { const s = l.stations, i = s.indexOf(atId), d = s.indexOf(nextId) > i ? 1 : -1, out = []; for (let k = i + d; k >= 0 && k < s.length; k += d) out.push(s[k]); return out; }
+const bestAhead = (ahead, shape) => ahead.reduce((m, x) => Math.min(m, platCost(x, shape)), Infinity);
 function podDest(p, ship) {
   if (!ship) { const r = route(p.at, null, p.shape); return r ? r.dest : null; }
   if (G.byId[ship.toId].shape === p.shape) return ship.toId;
@@ -221,41 +248,56 @@ function shipPos(sh) {
   return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, ang: Math.atan2(b.y - a.y, b.x - a.x) };
 }
 const speedFactor = e => e >= .5 ? 1 : .3 + .7 * (e / .5);
+// Smarter boarding: a waiting pod boards any ship that will reach a stop strictly closer (by remaining route cost) to a matching
+// station. It rides to the best of those stops and gets off there. Each alight point is strictly cheaper than where the pod
+// boarded, so pods can't ping-pong while the network is unchanged.
 function load(sh, st, next) {
-  let n = 0;
+  let n = 0; const ahead = onward(sh.line, st.id, next);
   for (let i = 0; i < st.pods.length && sh.pods.length < CFG.shipCap;) {
-    const p = st.pods[i], r = route(st.id, null, p.shape);
-    if (r && r.line === sh.line && r.next === next) { st.pods.splice(i, 1); sh.pods.push(p); n++; } else i++;
+    const p = st.pods[i];
+    if (bestAhead(ahead, p.shape) < platCost(st.id, p.shape)) { st.pods.splice(i, 1); sh.pods.push(p); n++; } else i++;
   }
   return n;
 }
 function arrive(sh) {
-  const st = G.byId[sh.toId], next = nextStop(sh); let moved = 0;
+  const st = G.byId[sh.toId], next = nextStop(sh), ahead = onward(sh.line, st.id, next); let moved = 0;
   for (let i = sh.pods.length - 1; i >= 0; i--) {
     const p = sh.pods[i];
     if (p.shape === st.shape) { sh.pods.splice(i, 1); deliver(st); moved++; continue; }
-    const r = route(st.id, sh.line, p.shape);
-    if (r && !(r.line === sh.line && r.next === next)) { sh.pods.splice(i, 1); st.pods.push(p); moved++; G.transfers++; }  // transfer / wait for the return trip
+    const here = platCost(st.id, p.shape);
+    if (here < Infinity && here <= bestAhead(ahead, p.shape)) { sh.pods.splice(i, 1); st.pods.push(p); moved++; G.transfers++; if ((p.was ||= []).includes(st.id)) G.pingpong++; p.was.push(st.id); }  // best alight point
   }
   moved += load(sh, st, next);
   sh.line.energy = Math.max(0, sh.line.energy - CFG.drainPod * moved);
   sh.dwell = .35 + .08 * moved;
   if (moved) G.dirty = true;
 }
+function addShip(l) {
+  if (!l) return;
+  if (G.shipTokens <= 0) return toast('No ship tokens yet: one every ' + CFG.shipPer + ' deliveries');
+  const mine = G.ships.filter(s => s.line === l);
+  if (mine.length >= CFG.maxShipsPerLine) return toast('That line already has ' + CFG.maxShipsPerLine + ' ships');
+  // start at the stop farthest (in stops) from the ships already on the line
+  const idx = mine.map(s => l.stations.indexOf(s.toId)); let best = l.stations[0], bd = -1;
+  l.stations.forEach((id, i) => { const d = Math.min(...idx.map(j => Math.abs(i - j))); if (d > bd) { bd = d; best = id; } });
+  G.ships.push({ line: l, fromId: best, toId: best, d: 0, dwell: .4, pods: [], extra: true });
+  G.shipTokens--; G.armed = null; G.dirty = true; toast('Ship added: ' + (mine.length + 1) + ' on this line');
+}
 function deliver(st) {
   G.delivered++; G.fx.push({ x: st.x, y: st.y, t: 0 });
   if (G.delivered % CFG.boostPer === 0 && G.boosts < CFG.maxBoosts) G.boosts++;
   if (G.delivered % CFG.stabPer === 0 && G.stabs < CFG.maxStabs) G.stabs++;
+  if (G.delivered % CFG.shipPer === 0 && G.shipTokens < CFG.maxShipTokens) { G.shipTokens++; G.note = '🚀 Ship token earned: tap 🚀, then a line'; }
   if (G.delivered % CFG.linePer === 0 && G.lineSlots < CFG.maxLines) { G.lineSlots++; G.note = 'New line unlocked: ' + G.lineSlots + ' lines'; }
 }
 
 // ---------- fixed-timestep simulation ----------
-function simRunning() { return screen === 'play' && !G.over && !G.draw && !G.sel && !G.paused; }
+function simRunning() { return screen === 'play' && !G.over && !G.draw && !G.sel && !G.paused && !G.hintOpen; }
 function step() {
   G.tick++; G.t = G.tick * STEP;
   if ((G.stationT -= STEP) <= 0) { G.stationT = stationInterval(G.t); if (G.stations.length < CFG.maxStations) spawnStation(); }
   if ((G.regenT -= STEP) <= 0) { G.regenT = CFG.boostRegen; if (G.boosts < CFG.maxBoosts) G.boosts++; }
-  const pace = Math.max(CFG.podFloor, 1 - G.t / CFG.podRamp);
+  const pace = 1 / (1 + G.t / CFG.podRamp);
   for (const st of G.stations) if ((st.podT -= STEP) <= 0) { st.podT = (CFG.podMin + G.rng() * CFG.podVar) * pace; spawnPod(st); G.dirty = true; }
   for (const st of G.stations) if (st.phase) {               // phase stations
     if (st.freeze > 0) st.freeze = Math.max(0, st.freeze - STEP);
@@ -265,7 +307,13 @@ function step() {
     const l = sh.line;
     if (sh.pods.length <= CFG.regenLoad) l.energy = Math.min(1, l.energy + CFG.regen * STEP);   // idle / light use recharges slowly
     if (sh.dwell > 0) {
-      if ((sh.dwell -= STEP) <= 0) { const nx = nextStop(sh); if (load(sh, G.byId[sh.toId], nx)) G.dirty = true; sh.fromId = sh.toId; sh.toId = nx; sh.d = 0; }
+      if ((sh.dwell -= STEP) <= 0) {
+        const nx = nextStop(sh); if (load(sh, G.byId[sh.toId], nx)) G.dirty = true;
+        const n = G.ships.reduce((c, o) => c + (o.line === l), 0), key = sh.toId + '>' + nx, dep = (l.dep ||= {});
+        const headway = n > 1 ? .5 * (2 * l.len / CFG.speed) / n : 0;            // half the even spacing, enough to spread ships out
+        if (headway && dep[key] != null && G.t - dep[key] < headway && (sh.held || 0) < 6) { sh.dwell = .25; sh.held = (sh.held || 0) + .25; continue; }
+        dep[key] = G.t; sh.held = 0; sh.fromId = sh.toId; sh.toId = nx; sh.d = 0;
+      }
       continue;
     }
     const L = dist(G.byId[sh.fromId], G.byId[sh.toId]);
@@ -283,7 +331,7 @@ function flip(st) {
   const ph = st.phase, before = new Map();
   for (const s of G.stations) for (const p of s.pods) before.set(p, p.dest);
   for (const sh of G.ships) for (const p of sh.pods) before.set(p, p.dest);
-  st.shape = st.shape === ph.a ? ph.b : ph.a; ph.t = ph.period; G.flips++;
+  st.shape = st.shape === ph.a ? ph.b : ph.a; ph.t = ph.period; G.flips++; G.costs = {};
   for (let i = st.pods.length - 1; i >= 0; i--) if (st.pods[i].shape === st.shape) { st.pods.splice(i, 1); deliver(st); }
   refreshRoutes();                                            // immediate re-path
   for (const [p, d] of before) if (p.dest !== d) G.repaths++;
@@ -329,13 +377,14 @@ cv.addEventListener('pointerdown', e => {
   if (k) { const s = k.line.stations.slice(); if (!k.end) s.reverse(); G.draw = { line: k.line, rev: !k.end, path: s, base: s.length, p: w }; return; }
   const st = hitStation(w);
   if (st) {
-    if (freeSlot() < 0) { toast('All ' + G.lineSlots + ' lines used: long-press one to delete'); ptr.done = true; return; }
+    if (freeSlot() < 0) { G.focus = G.focus === st.id ? null : st.id; ptr.done = true; return; }   // no free line: a tap still shows routes
     G.draw = { line: null, path: [st.id], base: 1, p: w }; return;
   }
   ptr.line = hitLine(w);
   if (ptr.line) pressTimer = setTimeout(() => { if (ptr && !ptr.moved && ptr.line) { G.sel = ptr.line; G.armed = null; ptr.done = true; } }, 450);
 });
 cv.addEventListener('pointermove', e => {
+  if (!ptr && G && e.pointerType === 'mouse') { const st = hitStation(toWorld(e.clientX, e.clientY)); G.hover = st ? st.id : null; }
   if (!ptr || e.pointerId !== ptr.id) return;
   if (Math.hypot(e.clientX - ptr.sx, e.clientY - ptr.sy) > 10) ptr.moved = true;
   const d = G.draw; if (!d) return;
@@ -350,14 +399,15 @@ function endPointer(e, cancel) {
   const d = G.draw;
   if (d) {
     G.draw = null;
-    if (!cancel && d.path.length > d.base && d.path.length >= 2) {
+    if (!cancel && !d.line && d.path.length === 1 && !ptr.moved) { const id = d.path[0]; G.focus = G.focus === id ? null : id; }   // tap = show routes
+    else if (!cancel && d.path.length > d.base && d.path.length >= 2) {
       const defs = lineDefs();
       if (d.line) { const def = defs.find(x => x.id === d.line.id); def.stations = d.rev ? d.path.slice().reverse() : d.path; }
       else defs.push({ id: G.nid++, slot: freeSlot(), stations: d.path, energy: 1 });
       editLines(defs);
     }
   } else if (!cancel && !ptr.done && !ptr.moved && performance.now() - ptr.t0 < 450) {
-    const l = ptr.line; if (l) boost(l); else if (G.armed) { G.armed = null; }
+    const l = ptr.line; G.focus = null; if (l) { if (G.armed === 'ship') addShip(l); else boost(l); } else G.armed = null;
   }
   ptr = null; ui();
 }
@@ -376,12 +426,14 @@ addEventListener('keydown', e => {
 function delSel() { if (!G.sel) return; editLines(lineDefs().filter(d => d.id !== G.sel.id)); G.sel = null; toast('Line deleted (↶ to undo)'); }
 $('btnBoost').onclick = () => { if (!G.boosts) return toast('No boosts left'); G.armed = G.armed === 'boost' ? null : 'boost'; if (G.armed) toast('Tap a line to boost it'); };
 $('btnStab').onclick = () => { if (!G.stabs) return toast('No stabilizers left'); G.armed = G.armed === 'stab' ? null : 'stab'; if (G.armed) toast('Tap a ring-timer station to freeze it'); };
+$('btnShip').onclick = () => { if (!G.shipTokens) return toast('Ship tokens: one every ' + CFG.shipPer + ' deliveries'); G.armed = G.armed === 'ship' ? null : 'ship'; if (G.armed) toast('Tap a line to add a ship'); };
+$('btnHint').onclick = () => { $('hint').classList.add('hide'); G.hintOpen = false; localStorage.setItem('neonOrbit.hint', '1'); };
 $('btnUndo').onclick = undo;
 $('btnDel').onclick = delSel;
 $('btnDone').onclick = () => { G.sel = null; };
 $('btnPause').onclick = () => { if (screen === 'play') G.paused = !G.paused; };
 $('btnSpeed').onclick = () => { G.speed = speedPref = SPEEDS[(SPEEDS.indexOf(G.speed) + 1) % SPEEDS.length]; localStorage.setItem('neonOrbit.speed', speedPref); };
-$('btnStart').onclick = () => { $('title').classList.remove('show'); screen = 'play'; fit(); };
+$('btnStart').onclick = () => { $('title').classList.remove('show'); screen = 'play'; fit(); if (!localStorage.getItem('neonOrbit.hint')) { G.hintOpen = true; $('hint').classList.remove('hide'); } };
 $('btnRestart').onclick = () => { $('over').classList.remove('show'); newGame(G.seed); };
 $('btnNew').onclick = () => { const s = Math.floor(Math.random() * 1e6); history.replaceState(null, '', '?seed=' + s); $('over').classList.remove('show'); newGame(s); };
 let toastT = 0; function toast(m) { const t = $('toast'); t.textContent = m; t.style.opacity = 1; clearTimeout(toastT); toastT = setTimeout(() => t.style.opacity = 0, 1600); }
@@ -394,6 +446,7 @@ function ui() {
   $('score').textContent = '◆ ' + G.delivered;
   $('meta').textContent = 'seed ' + G.seed + ' · ' + fmt(G.t) + ' · lines ' + G.lines.length + '/' + G.lineSlots;
   $('btnBoost').textContent = '⚡ ' + G.boosts; $('btnBoost').classList.toggle('on', G.armed === 'boost');
+  $('btnShip').textContent = '🚀 ' + G.shipTokens; $('btnShip').classList.toggle('on', G.armed === 'ship');
   $('btnStab').textContent = '❄ ' + G.stabs; $('btnStab').classList.toggle('on', G.armed === 'stab');
   $('btnUndo').disabled = !G.undo.length;
   $('btnDel').classList.toggle('hide', !G.sel); $('btnDone').classList.toggle('hide', !G.sel);
@@ -429,11 +482,53 @@ function polyline(l, upto) {   // stroke the line path; upto = fraction of total
   }
   ctx.stroke();
 }
-function drawPod(p, x, y, now) {
-  const flash = p.warn && Math.floor(now / 160) % 2 === 0;
-  shapePath(ctx, p.shape, x, y, 4.6);
-  ctx.fillStyle = p.warn ? (flash ? '#ff4d6d' : '#fff') : (p.dest ? '#e8fbff' : '#8aa0b8');
-  ctx.shadowColor = p.warn ? '#ff4d6d' : 'transparent'; ctx.shadowBlur = p.warn ? 8 : 0; ctx.fill(); ctx.shadowBlur = 0;
+function drawPod(p, x, y, now, r = CFG.podR) {
+  const lost = !p.dest, flash = p.warn && Math.floor(now / 160) % 2 === 0;
+  shapePath(ctx, p.shape, x, y, r);
+  if (lost) { ctx.globalAlpha = .45 + .35 * Math.sin(now / 220); ctx.fillStyle = '#6b7790'; ctx.fill(); ctx.globalAlpha = 1; return; }   // no route: gray + pulse
+  ctx.fillStyle = SHAPE_COL[p.shape]; ctx.fill();
+  ctx.lineWidth = p.warn ? 2.2 : 1.2; ctx.strokeStyle = p.warn ? (flash ? '#ff2d55' : '#fff') : 'rgba(5,6,15,.85)'; ctx.stroke();
+}
+function ring(x, y, r, a0, a1, col, w) { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.beginPath(); ctx.arc(x, y, r, a0, a1); ctx.stroke(); }
+const crowdCol = f => f > 1 ? '#ff2d55' : f > .6 ? '#ffb347' : '#3ddc84';
+function drawStation(st, now) {
+  const R = CFG.R, col = SHAPE_COL[st.shape], n = st.pods.length, f = n / CFG.cap, top = -Math.PI / 2;
+  // crowding ring: one segment per capacity slot, green -> amber -> red
+  for (let i = 0; i < CFG.cap; i++) {
+    const a0 = top + i * TAU / CFG.cap + .06, a1 = top + (i + 1) * TAU / CFG.cap - .06;
+    ring(st.x, st.y, R + 7, a0, a1, i < n ? crowdCol(f) : 'rgba(255,255,255,.10)', 3.5);
+  }
+  if (st.over > 0) {   // overcrowd countdown: pulsing red ring that empties as time runs out
+    const left = 1 - st.over / CFG.overLimit, pulse = .55 + .45 * Math.sin(now / 120);
+    ctx.globalAlpha = pulse; ctx.shadowColor = '#ff2d55'; ctx.shadowBlur = 14;
+    ring(st.x, st.y, R + 19, top, top + TAU * left, '#ff2d55', 4); ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  }
+  if (st.phase) {
+    const ph = st.phase, warn = !st.freeze && ph.t <= CFG.warn, nextShape = st.shape === ph.a ? ph.b : ph.a;
+    ring(st.x, st.y, R + 13, 0, TAU, 'rgba(255,255,255,.08)', 2);
+    if (st.freeze) {
+      ctx.shadowColor = '#9fe8ff'; ctx.shadowBlur = 12; ring(st.x, st.y, R + 13, top, top + TAU * st.freeze / CFG.freeze, '#9fe8ff', 2.5); ctx.shadowBlur = 0;
+      ctx.fillStyle = '#9fe8ff'; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.fillText('❄', st.x + R + 14, st.y - R - 8);
+    } else ring(st.x, st.y, R + 13, top, top + TAU * ph.t / ph.period, warn ? (Math.floor(now / 200) % 2 ? '#ff2d55' : '#fff') : 'rgba(255,255,255,.75)', 2.5);
+    // the shape it will become, in its own color, with a little arrow
+    const gx = st.x - R - 16, gy = st.y - R - 10;
+    shapePath(ctx, nextShape, gx, gy, 6); ctx.fillStyle = SHAPE_COL[nextShape]; ctx.globalAlpha = warn ? 1 : .75; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff'; ctx.font = '700 9px system-ui'; ctx.textAlign = 'center'; ctx.fillText('↻', gx + 10, gy + 3);
+  }
+  shapePath(ctx, st.shape, st.x, st.y, R);
+  ctx.fillStyle = '#0a1024'; ctx.fill();
+  ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.lineWidth = 3.5;
+  if (st.phase) ctx.setLineDash([5, 4]);   // phase stations: dashed outline
+  ctx.stroke(); ctx.setLineDash([]); ctx.shadowBlur = 0;
+  shapePath(ctx, st.shape, st.x, st.y, R * .45); ctx.fillStyle = col; ctx.globalAlpha = .55; ctx.fill(); ctx.globalAlpha = 1;
+  // waiting pods: 4 per row, drawn as their destination shape and color
+  const px = st.x + R + 14;
+  st.pods.forEach((p, i) => drawPod(p, px + (i % 4) * 14, st.y - 7 + Math.floor(i / 4) * 14, now));
+  if (n > CFG.cap) { ctx.fillStyle = '#ff2d55'; ctx.font = '700 11px system-ui'; ctx.textAlign = 'left'; ctx.fillText(n + '/' + CFG.cap, px - 6, st.y + 37); }
+  if (st.pods.some(p => !p.dest)) {   // unrouted pods: '?' badge
+    const bx = st.x + R + 2, by = st.y + R + 4; ctx.beginPath(); ctx.arc(bx, by, 7, 0, TAU); ctx.fillStyle = '#6b7790'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '700 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText('?', bx, by + 4);
+  }
 }
 function render(now) {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -451,8 +546,7 @@ function render(now) {
     ctx.strokeStyle = col; ctx.shadowColor = col;
     ctx.globalAlpha = .28 + .62 * e + l.flash * .3; ctx.shadowBlur = 4 + 20 * e + 20 * l.flash; ctx.lineWidth = G.sel === l ? 11 : 7; polyline(l);
     ctx.shadowBlur = 0; ctx.globalAlpha = 1;
-    // energy fill: bright core along the line, proportional to energy
-    ctx.lineWidth = 2.2; ctx.strokeStyle = low ? (Math.floor(now / 300) % 2 ? '#ff8aa0' : '#fff') : '#fff'; polyline(l, e);
+    ctx.lineWidth = 2.2; ctx.strokeStyle = low ? (Math.floor(now / 300) % 2 ? '#ff8aa0' : '#fff') : '#fff'; polyline(l, e);   // energy fill
     if (low) { ctx.setLineDash([3, 9]); ctx.lineDashOffset = -now / 60; ctx.strokeStyle = 'rgba(255,90,120,.7)'; ctx.lineWidth = 2; polyline(l); ctx.setLineDash([]); }
   }
   for (const k of knobs()) {   // end knobs (drag to extend) + energy label
@@ -461,58 +555,62 @@ function render(now) {
     ctx.beginPath(); ctx.arc(k.x, k.y, 6, 0, TAU); ctx.fillStyle = '#05060f'; ctx.fill(); ctx.stroke(); ctx.globalAlpha = 1;
     if (k.end === 0) { ctx.fillStyle = COLORS[k.line.slot]; ctx.font = '600 11px system-ui'; ctx.textAlign = 'center'; const lbl = Math.round(k.line.energy * 100) + '%'; ctx.lineWidth = 3; ctx.strokeStyle = '#05060f'; ctx.strokeText(lbl, k.x, k.y - 11); ctx.fillText(lbl, k.x, k.y - 11); }
   }
-  // drawing preview
   if (G.draw) {
-    const d = G.draw, col = d.line ? COLORS[d.line.slot] : COLORS[freeSlot()];
+    const d = G.draw, col = d.line ? COLORS[d.line.slot] : COLORS[Math.max(0, freeSlot())];
     ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.globalAlpha = .9; ctx.shadowColor = col; ctx.shadowBlur = 14;
     ctx.beginPath(); d.path.forEach((id, i) => { const s = G.byId[id]; i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); }); ctx.stroke();
     ctx.setLineDash([8, 8]); ctx.beginPath(); const last = G.byId[d.path[d.path.length - 1]]; ctx.moveTo(last.x, last.y); ctx.lineTo(d.p.x, d.p.y); ctx.stroke(); ctx.setLineDash([]);
     ctx.shadowBlur = 0; ctx.globalAlpha = 1;
   }
-  // stations
-  const R = CFG.R;
-  for (const st of G.stations) {
-    const oc = st.over / CFG.overLimit;
-    if (st.phase) {
-      const ph = st.phase, f = ph.t / ph.period, warn = !st.freeze && ph.t <= CFG.warn;
-      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,198,109,.18)'; ctx.beginPath(); ctx.arc(st.x, st.y, R + 10, 0, TAU); ctx.stroke();
-      if (st.freeze) {
-        ctx.strokeStyle = '#9fe8ff'; ctx.shadowColor = '#9fe8ff'; ctx.shadowBlur = 12; ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.arc(st.x, st.y, R + 10, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
-        ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(st.x, st.y, R + 15, -Math.PI / 2, -Math.PI / 2 + TAU * st.freeze / CFG.freeze); ctx.stroke(); ctx.shadowBlur = 0;
-        ctx.fillStyle = '#9fe8ff'; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.fillText('❄', st.x + R + 14, st.y - R - 6);
-      } else {
-        ctx.strokeStyle = warn ? (Math.floor(now / 200) % 2 ? '#ff4d6d' : '#ffc66d') : '#ffc66d'; ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 10;
-        ctx.beginPath(); ctx.arc(st.x, st.y, R + 10, -Math.PI / 2, -Math.PI / 2 + TAU * f); ctx.stroke(); ctx.shadowBlur = 0;
-      }
-      const nextShape = st.shape === ph.a ? ph.b : ph.a;   // ghost of the next shape
-      shapePath(ctx, nextShape, st.x - R - 13, st.y - R - 8, 5); ctx.strokeStyle = '#ffc66d'; ctx.lineWidth = 1.5; ctx.globalAlpha = .8; ctx.stroke(); ctx.globalAlpha = 1;
-    }
-    if (oc > 0) { ctx.strokeStyle = '#ff4d6d'; ctx.lineWidth = 4; ctx.shadowColor = '#ff4d6d'; ctx.shadowBlur = 12; ctx.beginPath(); ctx.arc(st.x, st.y, R + 18, -Math.PI / 2, -Math.PI / 2 + TAU * oc); ctx.stroke(); ctx.shadowBlur = 0; }
-    shapePath(ctx, st.shape, st.x, st.y, R);
-    ctx.fillStyle = oc > 0 ? `rgba(${120 + 120 * oc | 0},20,50,1)` : '#0a1024'; ctx.fill();
-    ctx.strokeStyle = '#e8fbff'; ctx.shadowColor = '#5ff3ff'; ctx.shadowBlur = 12; ctx.lineWidth = 3; ctx.stroke(); ctx.shadowBlur = 0;
-    // waiting pods: row of capacity slots, overflow row in red
-    for (let i = 0; i < CFG.cap; i++) { ctx.fillStyle = 'rgba(95,243,255,.12)'; ctx.fillRect(st.x + R + 6 + i * 11 - 4, st.y - 9, 8, 1.5); }
-    st.pods.forEach((p, i) => { const row = i < CFG.cap ? 0 : 1, col = i < CFG.cap ? i : i - CFG.cap; drawPod(p, st.x + R + 6 + col * 11, st.y - 2 + row * 12, now); });
-    if (st.pods.length > CFG.cap) { ctx.fillStyle = '#ff4d6d'; ctx.font = '600 10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(st.pods.length + '/' + CFG.cap, st.x + R + 6, st.y + 22); }
-  }
+  for (const st of G.stations) drawStation(st, now);
   // ships
   for (const sh of G.ships) {
     const p = shipPos(sh), col = COLORS[sh.line.slot];
     ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.ang);
     ctx.fillStyle = '#0b1430'; ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.roundRect(-17, -8, 34, 16, 8); ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0;
-    sh.pods.forEach((q, i) => { const shp = { ...q }; drawPod(shp, -10 + (i % 3) * 10, i < 3 ? -3 : 3.5, now); });
+    ctx.beginPath(); ctx.roundRect(-20, -11, 40, 22, 11); ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0;
+    sh.pods.forEach((q, i) => drawPod(q, -11 + (i % 3) * 11, i < 3 ? -4.5 : 5, now, 4.3));
     ctx.restore();
   }
-  for (const f of G.fx) { f.t += 1 / 60; ctx.strokeStyle = `rgba(157,255,138,${1 - f.t})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(f.x, f.y, R + f.t * 30, 0, TAU); ctx.stroke(); }
+  for (const f of G.fx) { f.t += 1 / 60; ctx.strokeStyle = `rgba(157,255,138,${1 - f.t})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(f.x, f.y, CFG.R + f.t * 30, 0, TAU); ctx.stroke(); }
   G.fx = G.fx.filter(f => f.t < 1);
-  // pause / edit indication
+  // route highlight for the tapped / hovered station: dim everything, then draw each waiting pod's route
+  const hl = G.byId[G.focus] || G.byId[G.hover];
+  G.hl = null;
+  if (hl) {
+    ctx.fillStyle = 'rgba(5,6,15,.62)'; ctx.fillRect(-2000, -2000, 6000, 6000);
+    const seen = new Map(), lost = hl.pods.filter(p => !p.dest).length;
+    for (const p of hl.pods) { if (!p.dest) continue; const r = route(hl.id, null, p.shape); if (r && !seen.has(p.shape + r.dest)) seen.set(p.shape + r.dest, { shape: p.shape, path: r.path, dest: r.dest }); }
+    G.hl = { station: hl.id, routes: [...seen.values()].map(r => ({ shape: r.shape, dest: r.dest, path: r.path.slice() })), lost };
+    const show = new Set([hl.id]);
+    let k = 0;
+    for (const r of seen.values()) {
+      const col = SHAPE_COL[r.shape], o = (k++ - (seen.size - 1) / 2) * 4;
+      ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 12; ctx.lineWidth = 4; ctx.setLineDash([10, 8]); ctx.lineDashOffset = -now / 30;
+      ctx.beginPath(); r.path.forEach((id, i) => { const s = G.byId[id]; show.add(id); i ? ctx.lineTo(s.x + o, s.y + o) : ctx.moveTo(s.x + o, s.y + o); }); ctx.stroke();
+      ctx.setLineDash([]); ctx.shadowBlur = 0;
+      const d = G.byId[r.dest]; ctx.globalAlpha = .5 + .5 * Math.sin(now / 200); ring(d.x, d.y, CFG.R + 26, 0, TAU, col, 3); ctx.globalAlpha = 1;
+    }
+    for (const id of show) drawStation(G.byId[id], now);
+    ctx.font = '600 12px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+    const msg = !hl.pods.length ? 'No pods waiting here' : lost ? lost + ' pod' + (lost > 1 ? 's have' : ' has') + ' no route: connect a matching shape' : 'Routes for waiting pods';
+    ctx.lineWidth = 3; ctx.strokeStyle = '#05060f'; ctx.strokeText(msg, hl.x, hl.y - CFG.R - 30); ctx.fillText(msg, hl.x, hl.y - CFG.R - 30);
+  }
+  // pause / edit indication + edge arrows to overcrowded stations
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const a = playArea();
+  for (const st of G.stations) if (st.over > 0) {
+    const sx = ox + st.x * sc, sy = oy + st.y * sc, cx = a.x + a.w / 2, cy = a.y + a.h / 2, ang = Math.atan2(sy - cy, sx - cx);
+    const m = 16, c = Math.cos(ang), sn = Math.sin(ang), t = Math.min((a.w / 2 - m) / (Math.abs(c) || 1e-9), (a.h / 2 - m) / (Math.abs(sn) || 1e-9));
+    const ex = cx + c * t, ey = cy + sn * t;   // where the ray from the centre toward the station meets the play-area edge
+    ctx.save(); ctx.translate(ex, ey); ctx.rotate(ang); ctx.globalAlpha = .6 + .4 * Math.sin(now / 120);
+    ctx.fillStyle = '#ff2d55'; ctx.shadowColor = '#ff2d55'; ctx.shadowBlur = 12; ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(-8, -9); ctx.lineTo(-4, 0); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill(); ctx.restore();
+    ctx.globalAlpha = 1; ctx.fillStyle = '#ff2d55'; ctx.font = '700 11px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(Math.ceil(CFG.overLimit - st.over) + 's', ex - Math.cos(ang) * 18, ey - Math.sin(ang) * 18 + 4);
+  }
   const editing = G.draw || G.sel;
   if (screen === 'play' && !G.over && (editing || G.paused)) {
-    const a = playArea(); ctx.fillStyle = 'rgba(40,60,120,.12)'; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = 'rgba(40,60,120,.12)'; ctx.fillRect(0, 0, VW, VH);
     ctx.strokeStyle = editing ? 'rgba(255,198,109,.7)' : 'rgba(95,243,255,.6)'; ctx.setLineDash([10, 8]); ctx.lineWidth = 2; ctx.strokeRect(4, a.y, VW - 8, a.h); ctx.setLineDash([]);
     ctx.fillStyle = editing ? '#ffc66d' : '#5ff3ff'; ctx.font = '700 13px system-ui'; ctx.textAlign = 'center';
     ctx.fillText(G.draw ? 'EDITING · PAUSED' : G.sel ? 'LINE SELECTED · PAUSED' : 'PAUSED', VW / 2, a.y + 18);
@@ -543,6 +641,7 @@ window.__dbg = {
   worldToScreen(p) { return { x: ox + p.x * sc, y: oy + p.y * sc }; },
   addLine(ids) { const defs = lineDefs(); defs.push({ id: G.nid++, slot: freeSlot(), stations: ids, energy: 1 }); editLines(defs); },
   route: (sid, shape) => { const r = route(sid, null, shape); return r && { line: r.line && r.line.id, next: r.next, dest: r.dest }; },
+  addShip(id) { addShip(G.lines.find(l => l.id === id)); }, platCost: (sid, shape) => platCost(sid, shape),
   defs: () => lineDefs(), edit(defs) { editLines(defs); }, boost(id) { boost(G.lines.find(l => l.id === id)); }, freeSlot: () => freeSlot(),
   knobs: () => knobs().map(k => ({ line: k.line.id, end: k.end, x: ox + k.x * sc, y: oy + k.y * sc })),
 };
