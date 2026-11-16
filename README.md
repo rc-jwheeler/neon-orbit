@@ -1,4 +1,4 @@
-# Neon Orbit (prototype v2)
+# Neon Orbit (prototype v2.1)
 
 A quiet, neon, space-themed transit builder. Draw glowing conduits between geometric stations; little capsule ships carry each cargo pod to a station of the **same colored shape**: cyan ● circle, magenta ■ square, yellow ▲ triangle, orange ◆ diamond. Lines use a separate, cooler palette (violet, blue, silver, green, bronze…) so they never look like a shape. Let one station get too crowded for too long and the run ends.
 
@@ -14,21 +14,26 @@ Single file (`index.html`), Canvas 2D, no build step, no backend.
 |---|---|
 | New line | Drag from a station across other stations, release. 5 lines to start, +1 every 40 deliveries (up to 7). |
 | Extend a line | Drag the small round **knob** at either end of a line onto more stations. Drag back over a station to un-add it. |
-| Delete / redraw | **Long-press** a line (or tap its ⚡% chip at the top), then **✕ Delete line**. Redraws are free. |
+| Delete / redraw | **Double-tap** (or double-click) a line: a popup with a big red **Delete line** button and **Cancel** appears by your finger, and the sim pauses. Tap anywhere else to dismiss it. Long-press a line, or tap its chip at the top, still works too. **↶** brings a deleted line back with its ships. Redraws are free. |
 | See where pods will go | **Tap a station** (or hover with a mouse). Everything dims and each waiting pod's route is drawn as an animated dashed path, in the pod's color, to its destination. Tap empty space or a line to clear. |
 | Add a ship | Earn a 🚀 token every 20 deliveries (max 5 held). Tap **🚀**, then tap a line. Up to 3 ships per line; deleting a line refunds its extra ships. |
-| Boost a conduit | **Tap a line** (or ⚡ then tap a line). Uses one charge: +50% energy. |
+| Boost a conduit | **Tap a line** once (or ⚡ then tap a line). Uses one charge: +50% energy. The boost lands ~¼ s after the tap so a double-tap can't spend two charges. |
 | Stabilize a phase station | Tap **❄**, then tap a dashed (phase) station: its shape is frozen for 10 s. |
 | Undo last line edit | **↶** button or **Ctrl/Cmd+Z** |
 | Pause / speed | **❚❚** (or Space) · speed button cycles **Chill (0.5×) / 1× / 2× / 3×**. Chill is the default; your choice is remembered. |
 
-The simulation always pauses while you are drawing or have a line selected (dashed amber frame + "EDITING · PAUSED"). A short first-run hint (3 lines) appears once; "Got it" dismisses it for good (stored in localStorage).
+**Short lines = faster ships and more energy. Delete and redraw freely: double-tap a line.**
+
+Each line's chip shows its energy and round-trip time (e.g. `⚡84% ⟳24s`). While you draw or extend a line, a live label shows the new round trip, energy drain and stop count (`⟳ 31s · −20%/min · 6 stops`). It turns amber past a 30 s round trip or 5 stops, and red past 40 s or 7 stops, with the hint *"Long line: slower ships, faster drain. Try a new line."* When a new station appears and a line slot is free, it pulses **+ start a new line here** for 8 s.
+
+The simulation always pauses while you are drawing or have a line selected (dashed amber frame + "EDITING · PAUSED"). A short first-run hint (4 lines, including the short-lines tip) appears once (key `neonOrbit.hint2`, so players who dismissed the older 3-line hint see it again); "Got it" dismisses it for good (stored in localStorage).
 
 ## Rules
 
 - **Stations** appear on a seeded map (circle, triangle, square; diamond later): every 30 s at first, ramping gently (1 s faster per minute) to every 18 s, up to 22 stations. Each is drawn in its shape's color.
 - **Crowding:** a segmented ring around every station fills with its waiting pods against capacity 8, green → amber (over 60%) → red (over capacity). Over capacity, a pulsing red countdown ring empties over 25 s and a red arrow with the seconds left points at it from the edge of the play area; when it runs out the run ends (it recovers when the crowd clears).
 - **Pods** are drawn as their destination shape, filled in that shape's color. They route over the whole network (Dijkstra over stations × lines; ride 1 per stop, board 0.5, alight 1.5, so a transfer costs 2). A pod **boards any ship whose remaining stops include a station strictly closer (by that cost) to a matching shape**, rides to the best of those stops and gets off there. Because every alight point is strictly closer than where the pod boarded, pods can't ping-pong. Routes are recomputed instantly on any edit, phase change or new station. Pods with no route turn gray and pulse, and their station gets a gray **?** badge.
+- **Round-trip time** shown to the player = 2 × line length ÷ ship speed + about 0.5 s per stop, at full energy. Below 50% energy it's slower.
 - **Ships** space themselves out: a ship won't leave a stop in the same direction until a sibling on the same line has had a head start (half the even spacing, max 6 s hold).
 - **Energy conduits:** every line shows its energy as glow brightness, a bright core that fills the line in proportion to energy, and a % on its start knob and HUD chip. Energy drains while its ship moves (more on longer lines) and a little per pod moved, and slowly recharges (+0.3%/s) whenever the ship carries 2 pods or fewer. Below 50% the ship slows (down to 30% speed) and the line shows red dashes. Boost charges: start with 4, +1 every 4 deliveries and every 30 s (max 8).
 - **Phase stations** have a **dashed outline**, a white ring timer, and a small filled icon of the shape (and color) they'll become next. They flip between the two shapes when the timer runs out. Pods heading there flash red in the last 3 s; on the flip, pods re-path immediately (and pods already waiting there that now match are delivered). Stabilizers: start with 2, +1 every 12 deliveries (max 4).

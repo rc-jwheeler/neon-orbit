@@ -42,6 +42,10 @@
   #hint { position:absolute; left:50%; transform:translateX(-50%); bottom:calc(env(safe-area-inset-bottom) + 74px); width:min(340px, 92vw);
     background:rgba(10,16,38,.95); border:1px solid rgba(95,243,255,.45); border-radius:16px; padding:12px 14px; font-size:14px; line-height:1.45; box-shadow:0 0 20px rgba(95,243,255,.25); }
   #hint div { margin:3px 0; } #hint button { margin-top:8px; width:100%; height:42px; }
+  #confirm { position:absolute; display:flex; gap:8px; padding:10px; background:rgba(10,16,38,.96); border:1px solid rgba(255,90,120,.6);
+    border-radius:16px; box-shadow:0 0 22px rgba(255,45,85,.35); z-index:5; }
+  #confirm button { height:52px; font-size:16px; font-weight:700; }
+  #cfDel { background:#c8143c; border-color:#ff5c7a; color:#fff; min-width:140px; box-shadow:0 0 14px rgba(255,45,85,.6); }
   .big { margin-top:16px; height:52px; padding:0 34px; font-size:18px; font-weight:700; border-radius:28px; border-color:var(--cyan); box-shadow:0 0 18px rgba(95,243,255,.4); }
 </style>
 </head>
@@ -68,6 +72,7 @@
   <p><b>Drag</b> station → station to draw a line. Drag a line's end knob to extend it. <b>Long-press</b> a line to delete it. The sim pauses while you edit.</p>
   <p><b>Tap a station</b> to see where its pods will go. <b>Tap a line</b> to boost its energy ⚡. Earn 🚀 ship tokens and tap a line to add ships.</p>
   <p>Dashed stations change shape on a timer; tap ❄ then one to freeze it.</p>
+  <p><b>Short lines</b> = faster round trips and more energy. <b>Double-tap a line</b> to delete it and redraw.</p>
   <p>Too many pods waiting at one station for too long ends the run.</p>
   <button class="big" id="btnStart">Start</button>
 </div>
@@ -75,8 +80,10 @@
   <div>👉 <b>Drag</b> from station to station to make a line.</div>
   <div>📦 Pods ride to the <b>matching colored shape</b>.</div>
   <div>🔍 <b>Tap a station</b> to see its pods' routes.</div>
+  <div>⟳ <b>Short lines</b> = faster ships and more energy. Delete and redraw freely: <b>double-tap a line</b>.</div>
   <button id="btnHint">Got it</button>
 </div>
+<div id="confirm" class="hide"><button id="cfDel">🗑 Delete line</button><button id="cfCancel">Cancel</button></div>
 <div class="overlay" id="over">
   <h2>Station overcrowded</h2>
   <p id="overTxt"></p>
@@ -100,6 +107,13 @@ const CFG = { short: 420, R: 16, cap: 8, overLimit: 25, shipCap: 6, speed: 72, m
   shipPer: 20, maxShipTokens: 5, maxShipsPerLine: 3, podR: 5.5 };
 const SPEEDS = [.5, 1, 2, 3], speedLabel = v => v === .5 ? 'Chill' : v + '×';
 let speedPref = +(localStorage.getItem('neonOrbit.speed') || .5); if (!SPEEDS.includes(speedPref)) speedPref = .5;
+// Line metrics shown to the player: nominal round-trip time (full energy, ~0.5 s per stop) and energy drain while moving.
+const HINT_KEY = 'neonOrbit.hint2';
+const roundTrip = (len, n) => 2 * len / CFG.speed + 2 * Math.max(0, n - 1) * .5;
+const drainPerMin = len => (CFG.drainBase + CFG.drainLen * len / 500) * 6000;   // % per minute while the ship moves
+const lineLevel = (rt, n) => rt > 40 || n > 7 ? 'red' : rt > 30 || n > 5 ? 'amber' : 'ok';
+const LEVEL_COL = { ok: '#9fe8ff', amber: '#ffb347', red: '#ff2d55' };
+function pathLen(ids) { let s = 0; for (let i = 1; i < ids.length; i++) s += dist(G.byId[ids[i - 1]], G.byId[ids[i]]); return s; }
 const stationInterval = t => Math.max(CFG.stationMin, CFG.stationStart - t / CFG.stationRamp);
 
 // ---------- seeded RNG ----------
@@ -135,7 +149,7 @@ function newGame(seed) {
 function uvToWorld(u, v) { return G.portrait ? { x: u * G.W, y: v * G.H } : { x: v * G.W, y: u * G.H }; }
 function addStation(shape, u, v, phase) {
   const p = uvToWorld(u, v);
-  const st = { id: G.stations.length + 1, x: p.x, y: p.y, u, v, shape, pods: [], over: 0, podT: 3 + G.rng() * 4, phase: null, freeze: 0 };
+  const st = { id: G.stations.length + 1, born: G.t, x: p.x, y: p.y, u, v, shape, pods: [], over: 0, podT: 3 + G.rng() * 4, phase: null, freeze: 0 };
   if (phase) { const period = 14 + Math.floor(G.rng() * 5); st.phase = { a: shape, b: phase, period, t: period }; }
   G.stations.push(st); G.byId[st.id] = st; G.costs = {}; return st;
 }
@@ -158,7 +172,7 @@ function spawnPod(st) {
 }
 
 // ---------- lines (all edits go through setLines so ships/undo stay consistent) ----------
-const lineDefs = () => G.lines.map(l => ({ id: l.id, slot: l.slot, stations: l.stations.slice(), energy: l.energy }));
+const lineDefs = () => G.lines.map(l => ({ id: l.id, slot: l.slot, stations: l.stations.slice(), energy: l.energy, ships: G.ships.filter(s => s.line === l).length }));
 function lineLen(l) { let s = 0; for (let i = 1; i < l.stations.length; i++) s += dist(G.byId[l.stations[i - 1]], G.byId[l.stations[i]]); return s; }
 function setLines(defs) {
   const old = Object.fromEntries(G.lines.map(l => [l.id, l]));
@@ -177,7 +191,12 @@ function setLines(defs) {
       sh.fromId = sh.toId = best; sh.d = 0; sh.dwell = .3;
     }
   }
-  for (const l of G.lines) if (!G.ships.some(sh => sh.line === l)) G.ships.push({ line: l, fromId: l.stations[0], toId: l.stations[0], d: 0, dwell: .4, pods: [] });
+  for (const [i, l] of G.lines.entries()) if (!G.ships.some(sh => sh.line === l)) {
+    G.ships.push({ line: l, fromId: l.stations[0], toId: l.stations[0], d: 0, dwell: .4, pods: [] });
+    // a line brought back by undo gets its extra ships back too (paid from the tokens it refunded when deleted)
+    const extra = Math.min((defs[i].ships || 1) - 1, G.shipTokens);
+    for (let k = 0; k < extra; k++) { placeShip(l); G.shipTokens--; }
+  }
   G.stLines = {}; for (const l of G.lines) for (const id of l.stations) (G.stLines[id] ||= []).push(l);
   G.costs = {}; refreshRoutes();
 }
@@ -272,16 +291,17 @@ function arrive(sh) {
   sh.dwell = .35 + .08 * moved;
   if (moved) G.dirty = true;
 }
+function placeShip(l) {   // start at the stop farthest (in stops) from the ships already on the line
+  const idx = G.ships.filter(s => s.line === l).map(s => l.stations.indexOf(s.toId)); let best = l.stations[0], bd = -1;
+  l.stations.forEach((id, i) => { const d = Math.min(...idx.map(j => Math.abs(i - j))); if (d > bd) { bd = d; best = id; } });
+  G.ships.push({ line: l, fromId: best, toId: best, d: 0, dwell: .4, pods: [], extra: true });
+}
 function addShip(l) {
   if (!l) return;
   if (G.shipTokens <= 0) return toast('No ship tokens yet: one every ' + CFG.shipPer + ' deliveries');
   const mine = G.ships.filter(s => s.line === l);
   if (mine.length >= CFG.maxShipsPerLine) return toast('That line already has ' + CFG.maxShipsPerLine + ' ships');
-  // start at the stop farthest (in stops) from the ships already on the line
-  const idx = mine.map(s => l.stations.indexOf(s.toId)); let best = l.stations[0], bd = -1;
-  l.stations.forEach((id, i) => { const d = Math.min(...idx.map(j => Math.abs(i - j))); if (d > bd) { bd = d; best = id; } });
-  G.ships.push({ line: l, fromId: best, toId: best, d: 0, dwell: .4, pods: [], extra: true });
-  G.shipTokens--; G.armed = null; G.dirty = true; toast('Ship added: ' + (mine.length + 1) + ' on this line');
+  placeShip(l); G.shipTokens--; G.armed = null; G.dirty = true; toast('Ship added: ' + (mine.length + 1) + ' on this line');
 }
 function deliver(st) {
   G.delivered++; G.fx.push({ x: st.x, y: st.y, t: 0 });
@@ -292,7 +312,7 @@ function deliver(st) {
 }
 
 // ---------- fixed-timestep simulation ----------
-function simRunning() { return screen === 'play' && !G.over && !G.draw && !G.sel && !G.paused && !G.hintOpen; }
+function simRunning() { return screen === 'play' && !G.over && !G.draw && !G.sel && !G.paused && !G.hintOpen && !G.confirm; }
 function step() {
   G.tick++; G.t = G.tick * STEP;
   if ((G.stationT -= STEP) <= 0) { G.stationT = stationInterval(G.t); if (G.stations.length < CFG.maxStations) spawnStation(); }
@@ -343,7 +363,23 @@ function gameOver(st) {
 }
 
 // ---------- input ----------
-let ptr = null, pressTimer = 0;
+let ptr = null, pressTimer = 0, tapTimer = 0, lastTap = null;
+const DOUBLE_MS = 250;
+function openConfirm(l, x, y) {
+  clearTimeout(tapTimer); lastTap = null; G.confirm = l; G.sel = null; G.armed = null;
+  const c = $('confirm'); c.classList.remove('hide');
+  const w = c.offsetWidth, h = c.offsetHeight, a = playArea();
+  c.style.left = Math.max(8, Math.min(VW - w - 8, x - w / 2)) + 'px';
+  c.style.top = Math.max(a.y + 4, Math.min(a.y + a.h - h - 4, y - h - 24)) + 'px';
+}
+function closeConfirm() { G.confirm = null; $('confirm').classList.add('hide'); }
+function lineTap(l, x, y) {   // single tap = boost/add ship after DOUBLE_MS; a second tap on a line in that window = delete prompt
+  const now = performance.now();
+  if (lastTap && now - lastTap.t < DOUBLE_MS + 100 && Math.hypot(x - lastTap.x, y - lastTap.y) < 40) return openConfirm(lastTap.line, x, y);
+  lastTap = { t: now, x, y, line: l };
+  clearTimeout(tapTimer);
+  tapTimer = setTimeout(() => { lastTap = null; if (!G.lines.includes(l) || G.over) return; if (G.armed === 'ship') addShip(l); else boost(l); ui(); }, DOUBLE_MS);
+}
 const hitR = () => Math.max(28, 24 / sc);
 function hitStation(w, r = hitR()) { let best = null, bd = r; for (const s of G.stations) { const d = dist(s, w); if (d < bd) { bd = d; best = s; } } return best; }
 function knobs() {
@@ -366,6 +402,7 @@ cv.addEventListener('pointerdown', e => {
   cv.setPointerCapture(e.pointerId);
   const w = toWorld(e.clientX, e.clientY);
   ptr = { id: e.pointerId, sx: e.clientX, sy: e.clientY, t0: performance.now(), moved: false };
+  if (G.confirm) { closeConfirm(); ptr.done = true; return; }   // tapping elsewhere dismisses the delete prompt
   if (G.armed === 'stab') {
     const st = hitStation(w); G.armed = null; ptr.done = true;
     if (st && st.phase) { if (G.stabs > 0) { G.stabs--; st.freeze = CFG.freeze; G.dirty = true; refreshRoutes(); toast('Phase frozen for ' + CFG.freeze + 's'); } }
@@ -407,7 +444,7 @@ function endPointer(e, cancel) {
       editLines(defs);
     }
   } else if (!cancel && !ptr.done && !ptr.moved && performance.now() - ptr.t0 < 450) {
-    const l = ptr.line; G.focus = null; if (l) { if (G.armed === 'ship') addShip(l); else boost(l); } else G.armed = null;
+    const l = ptr.line; G.focus = null; if (l) lineTap(l, e.clientX, e.clientY); else G.armed = null;
   }
   ptr = null; ui();
 }
@@ -420,22 +457,24 @@ function boost(l) {
 addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
   else if (e.key === ' ' && screen === 'play') { e.preventDefault(); G.paused = !G.paused; }
-  else if (e.key === 'Escape' && G) { G.sel = null; G.armed = null; }
+  else if (e.key === 'Escape' && G) { G.sel = null; G.armed = null; closeConfirm(); }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && G && G.sel) delSel();
 });
 function delSel() { if (!G.sel) return; editLines(lineDefs().filter(d => d.id !== G.sel.id)); G.sel = null; toast('Line deleted (↶ to undo)'); }
 $('btnBoost').onclick = () => { if (!G.boosts) return toast('No boosts left'); G.armed = G.armed === 'boost' ? null : 'boost'; if (G.armed) toast('Tap a line to boost it'); };
 $('btnStab').onclick = () => { if (!G.stabs) return toast('No stabilizers left'); G.armed = G.armed === 'stab' ? null : 'stab'; if (G.armed) toast('Tap a ring-timer station to freeze it'); };
 $('btnShip').onclick = () => { if (!G.shipTokens) return toast('Ship tokens: one every ' + CFG.shipPer + ' deliveries'); G.armed = G.armed === 'ship' ? null : 'ship'; if (G.armed) toast('Tap a line to add a ship'); };
-$('btnHint').onclick = () => { $('hint').classList.add('hide'); G.hintOpen = false; localStorage.setItem('neonOrbit.hint', '1'); };
+$('btnHint').onclick = () => { $('hint').classList.add('hide'); G.hintOpen = false; localStorage.setItem(HINT_KEY, '1'); };
 $('btnUndo').onclick = undo;
 $('btnDel').onclick = delSel;
+$('cfDel').onclick = () => { const l = G.confirm; closeConfirm(); if (l && G.lines.includes(l)) { editLines(lineDefs().filter(d => d.id !== l.id)); toast('Line deleted (↶ to undo)'); } };
+$('cfCancel').onclick = closeConfirm;
 $('btnDone').onclick = () => { G.sel = null; };
 $('btnPause').onclick = () => { if (screen === 'play') G.paused = !G.paused; };
 $('btnSpeed').onclick = () => { G.speed = speedPref = SPEEDS[(SPEEDS.indexOf(G.speed) + 1) % SPEEDS.length]; localStorage.setItem('neonOrbit.speed', speedPref); };
-$('btnStart').onclick = () => { $('title').classList.remove('show'); screen = 'play'; fit(); if (!localStorage.getItem('neonOrbit.hint')) { G.hintOpen = true; $('hint').classList.remove('hide'); } };
-$('btnRestart').onclick = () => { $('over').classList.remove('show'); newGame(G.seed); };
-$('btnNew').onclick = () => { const s = Math.floor(Math.random() * 1e6); history.replaceState(null, '', '?seed=' + s); $('over').classList.remove('show'); newGame(s); };
+$('btnStart').onclick = () => { $('title').classList.remove('show'); screen = 'play'; fit(); if (!localStorage.getItem(HINT_KEY)) { G.hintOpen = true; $('hint').classList.remove('hide'); } };
+$('btnRestart').onclick = () => { closeConfirm(); $('over').classList.remove('show'); newGame(G.seed); };
+$('btnNew').onclick = () => { closeConfirm(); const s = Math.floor(Math.random() * 1e6); history.replaceState(null, '', '?seed=' + s); $('over').classList.remove('show'); newGame(s); };
 let toastT = 0; function toast(m) { const t = $('toast'); t.textContent = m; t.style.opacity = 1; clearTimeout(toastT); toastT = setTimeout(() => t.style.opacity = 0, 1600); }
 
 // ---------- HUD ----------
@@ -452,14 +491,16 @@ function ui() {
   $('btnDel').classList.toggle('hide', !G.sel); $('btnDone').classList.toggle('hide', !G.sel);
   $('btnPause').textContent = G.paused ? '▶' : '❚❚'; $('btnSpeed').textContent = speedLabel(G.speed);
   if (G.note) { toast(G.note); G.note = null; }
-  const key = G.lines.map(l => l.id + ':' + Math.round(l.energy * 100) + (G.sel === l ? 's' : '')).join();
+  const key = G.lines.map(l => l.id + ':' + Math.round(l.energy * 100) + ':' + Math.round(roundTrip(l.len, l.stations.length)) + (G.sel === l ? 's' : '')).join();
   if (key !== chipKey) {
     chipKey = key; const c = $('chips'); c.innerHTML = '';
     for (const l of G.lines) {
       const b = document.createElement('span'), pct = Math.round(l.energy * 100);
       b.className = 'chip' + (l.energy < .5 ? ' low' : ''); b.style.borderColor = b.style.color = COLORS[l.slot];
       if (G.sel === l) b.style.background = 'rgba(255,255,255,.15)';
-      b.textContent = '⚡' + pct + '%'; b.onclick = () => { if (screen === 'play' && !G.over) G.sel = G.sel === l ? null : l; };
+      const rt = roundTrip(l.len, l.stations.length), lv = lineLevel(rt, l.stations.length);
+      b.dataset.rt = Math.round(rt); b.title = 'Energy ' + pct + '%, round trip ' + Math.round(rt) + ' s';
+      b.innerHTML = '⚡' + pct + '% <span style="color:' + (lv === 'ok' ? 'inherit' : LEVEL_COL[lv]) + '">⟳' + Math.round(rt) + 's</span>'; b.onclick = () => { if (screen === 'play' && !G.over) G.sel = G.sel === l ? null : l; };
       c.appendChild(b);
     }
   }
@@ -530,6 +571,19 @@ function drawStation(st, now) {
     ctx.fillStyle = '#fff'; ctx.font = '700 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText('?', bx, by + 4);
   }
 }
+function metricLabel(x, y, len, n, mode) {   // '⟳ 24s · −9%/min · 4 stops' (+ warning when the line is long)
+  const rt = roundTrip(len, n), lv = lineLevel(rt, n), col = LEVEL_COL[lv];
+  const txt = '⟳ ' + Math.round(rt) + 's · −' + drainPerMin(len).toFixed(0) + '%/min · ' + n + ' stops';
+  ctx.font = '700 13px system-ui'; ctx.textAlign = 'center'; const w = ctx.measureText(txt).width + 16;
+  const cx = Math.max(w / 2 + 4, Math.min(G.W - w / 2 - 4, x)), cy = Math.max(40, y);
+  ctx.fillStyle = 'rgba(5,6,15,.88)'; ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - 15, w, 22, 9); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = col; ctx.fillText(txt, cx, cy + 1);
+  if (lv !== 'ok' && mode) {
+    const hint = lv === 'red' ? 'Long line: slower ships, faster drain. Try a new line.' : 'Getting long: round trips slow down.';
+    ctx.font = '600 11px system-ui'; const w2 = ctx.measureText(hint).width + 14, hx = Math.max(w2 / 2 + 4, Math.min(G.W - w2 / 2 - 4, x));
+    ctx.fillStyle = 'rgba(5,6,15,.88)'; ctx.beginPath(); ctx.roundRect(hx - w2 / 2, cy + 10, w2, 18, 8); ctx.fill(); ctx.fillStyle = col; ctx.fillText(hint, hx, cy + 23);
+  }
+}
 function render(now) {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   const g = ctx.createRadialGradient(VW * .5, VH * .4, 0, VW * .5, VH * .5, Math.max(VW, VH) * .8);
@@ -544,7 +598,7 @@ function render(now) {
     const col = COLORS[l.slot], e = l.energy, low = e < .5;
     l.flash = Math.max(0, (l.flash || 0) - .03);
     ctx.strokeStyle = col; ctx.shadowColor = col;
-    ctx.globalAlpha = .28 + .62 * e + l.flash * .3; ctx.shadowBlur = 4 + 20 * e + 20 * l.flash; ctx.lineWidth = G.sel === l ? 11 : 7; polyline(l);
+    ctx.globalAlpha = .28 + .62 * e + l.flash * .3; ctx.shadowBlur = 4 + 20 * e + 20 * l.flash; ctx.lineWidth = G.sel === l || G.confirm === l ? 11 : 7; polyline(l);
     ctx.shadowBlur = 0; ctx.globalAlpha = 1;
     ctx.lineWidth = 2.2; ctx.strokeStyle = low ? (Math.floor(now / 300) % 2 ? '#ff8aa0' : '#fff') : '#fff'; polyline(l, e);   // energy fill
     if (low) { ctx.setLineDash([3, 9]); ctx.lineDashOffset = -now / 60; ctx.strokeStyle = 'rgba(255,90,120,.7)'; ctx.lineWidth = 2; polyline(l); ctx.setLineDash([]); }
@@ -555,12 +609,28 @@ function render(now) {
     ctx.beginPath(); ctx.arc(k.x, k.y, 6, 0, TAU); ctx.fillStyle = '#05060f'; ctx.fill(); ctx.stroke(); ctx.globalAlpha = 1;
     if (k.end === 0) { ctx.fillStyle = COLORS[k.line.slot]; ctx.font = '600 11px system-ui'; ctx.textAlign = 'center'; const lbl = Math.round(k.line.energy * 100) + '%'; ctx.lineWidth = 3; ctx.strokeStyle = '#05060f'; ctx.strokeText(lbl, k.x, k.y - 11); ctx.fillText(lbl, k.x, k.y - 11); }
   }
+  let label = null;   // line metrics label, drawn on top of stations and ships
   if (G.draw) {
     const d = G.draw, col = d.line ? COLORS[d.line.slot] : COLORS[Math.max(0, freeSlot())];
     ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.globalAlpha = .9; ctx.shadowColor = col; ctx.shadowBlur = 14;
     ctx.beginPath(); d.path.forEach((id, i) => { const s = G.byId[id]; i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); }); ctx.stroke();
     ctx.setLineDash([8, 8]); ctx.beginPath(); const last = G.byId[d.path[d.path.length - 1]]; ctx.moveTo(last.x, last.y); ctx.lineTo(d.p.x, d.p.y); ctx.stroke(); ctx.setLineDash([]);
     ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+    // live preview of what this line will be like
+    const len = pathLen(d.path), n = d.path.length, rt = roundTrip(len, n), lv = lineLevel(rt, n);
+    G.drawInfo = { rt: Math.round(rt), drain: +drainPerMin(len).toFixed(1), n, level: lv };
+    if (n >= 2) label = [d.p.x, d.p.y - 34, len, n, d.line ? 'extend' : 'new'];
+  } else G.drawInfo = null;
+  if (G.sel && G.lines.includes(G.sel)) { const m = G.byId[G.sel.stations[G.sel.stations.length >> 1]]; label = [m.x, m.y - 30, G.sel.len, G.sel.stations.length]; }
+  // new station + a free line slot: pulse a 'start a new line here' ring for 8 s
+  G.newHint = null;
+  if (freeSlot() >= 0) for (const st of G.stations) {
+    if (G.t - st.born > 8 || st.born === 0 || G.stLines[st.id]) continue;
+    G.newHint = st.id; const k = (now % 1200) / 1200;
+    ctx.strokeStyle = COLORS[freeSlot()]; ctx.globalAlpha = 1 - k; ctx.lineWidth = 3; ctx.setLineDash([6, 6]);
+    ctx.beginPath(); ctx.arc(st.x, st.y, CFG.R + 10 + k * 26, 0, TAU); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    ctx.font = '700 11px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = COLORS[freeSlot()]; ctx.lineWidth = 3; ctx.strokeStyle = '#05060f';
+    ctx.strokeText('+ start a new line here', st.x, st.y + CFG.R + 34); ctx.fillText('+ start a new line here', st.x, st.y + CFG.R + 34);
   }
   for (const st of G.stations) drawStation(st, now);
   // ships
@@ -574,6 +644,7 @@ function render(now) {
   }
   for (const f of G.fx) { f.t += 1 / 60; ctx.strokeStyle = `rgba(157,255,138,${1 - f.t})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(f.x, f.y, CFG.R + f.t * 30, 0, TAU); ctx.stroke(); }
   G.fx = G.fx.filter(f => f.t < 1);
+  if (label) metricLabel(...label);
   // route highlight for the tapped / hovered station: dim everything, then draw each waiting pod's route
   const hl = G.byId[G.focus] || G.byId[G.hover];
   G.hl = null;
@@ -608,12 +679,12 @@ function render(now) {
     ctx.globalAlpha = 1; ctx.fillStyle = '#ff2d55'; ctx.font = '700 11px system-ui'; ctx.textAlign = 'center';
     ctx.fillText(Math.ceil(CFG.overLimit - st.over) + 's', ex - Math.cos(ang) * 18, ey - Math.sin(ang) * 18 + 4);
   }
-  const editing = G.draw || G.sel;
+  const editing = G.draw || G.sel || G.confirm;
   if (screen === 'play' && !G.over && (editing || G.paused)) {
     ctx.fillStyle = 'rgba(40,60,120,.12)'; ctx.fillRect(0, 0, VW, VH);
     ctx.strokeStyle = editing ? 'rgba(255,198,109,.7)' : 'rgba(95,243,255,.6)'; ctx.setLineDash([10, 8]); ctx.lineWidth = 2; ctx.strokeRect(4, a.y, VW - 8, a.h); ctx.setLineDash([]);
     ctx.fillStyle = editing ? '#ffc66d' : '#5ff3ff'; ctx.font = '700 13px system-ui'; ctx.textAlign = 'center';
-    ctx.fillText(G.draw ? 'EDITING · PAUSED' : G.sel ? 'LINE SELECTED · PAUSED' : 'PAUSED', VW / 2, a.y + 18);
+    ctx.fillText(G.draw ? 'EDITING · PAUSED' : G.confirm ? 'DELETE THIS LINE? · PAUSED' : G.sel ? 'LINE SELECTED · PAUSED' : 'PAUSED', VW / 2, a.y + 18);
   }
 }
 
