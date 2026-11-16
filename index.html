@@ -47,7 +47,7 @@
 <div class="bar" id="top">
   <div><div class="score" id="score">◆ 0</div><div class="meta" id="meta">seed · 0:00</div></div>
   <div id="chips"></div>
-  <button class="sm" id="btnSpeed" title="Speed">1×</button>
+  <button class="sm" id="btnSpeed" title="Speed: Chill (0.5×) / 1× / 2× / 3×">Chill</button>
   <button class="sm" id="btnPause" title="Pause (Space)">❚❚</button>
 </div>
 <div class="bar" id="bot">
@@ -76,10 +76,17 @@
 'use strict';
 // ---------- config ----------
 const STEP = 1 / 60, TAU = Math.PI * 2;
-const COLORS = ['#5ff3ff', '#ff6ad5', '#ffc66d', '#9dff8a', '#b18cff'];
-const OFFS = [0, -5, 5, -10, 10];               // parallel offset per line slot
-const CFG = { short: 420, R: 16, cap: 6, overLimit: 14, shipCap: 6, speed: 78, stationEvery: 15, maxStations: 18,
-  warn: 3, freeze: 10, boostAmt: .5, maxLines: 5, maxBoosts: 6, maxStabs: 4, boostRegen: 45 };
+const COLORS = ['#5ff3ff', '#ff6ad5', '#ffc66d', '#9dff8a', '#b18cff', '#ff8a5c', '#6fa8ff'];
+const OFFS = [0, -5, 5, -10, 10, -15, 15];               // parallel offset per line slot
+// Pacing (v1.1): slower station/pod spawns with a gentle ramp, half the energy drain + idle regen, longer overcrowd timer.
+const CFG = { short: 420, R: 16, cap: 8, overLimit: 25, shipCap: 6, speed: 72, maxStations: 18,
+  stationStart: 30, stationMin: 18, stationRamp: 60,   // station interval: 30 s, shrinking 1 s per minute, floor 18 s
+  podMin: 10, podVar: 8, podRamp: 900, podFloor: .55,  // per-station pod interval (10-18 s) x max(.55, 1 - t/900)
+  drainBase: .0015, drainLen: .003, drainPod: .002, regen: .003, regenLoad: 2,   // energy per s; regen when ship carries <= 2 pods
+  warn: 3, freeze: 10, boostAmt: .5, baseLines: 5, maxLines: 7, linePer: 40, maxBoosts: 8, maxStabs: 4, boostRegen: 30, boostPer: 4, stabPer: 12 };
+const SPEEDS = [.5, 1, 2, 3], speedLabel = v => v === .5 ? 'Chill' : v + '×';
+let speedPref = +(localStorage.getItem('neonOrbit.speed') || .5); if (!SPEEDS.includes(speedPref)) speedPref = .5;
+const stationInterval = t => Math.max(CFG.stationMin, CFG.stationStart - t / CFG.stationRamp);
 
 // ---------- seeded RNG ----------
 function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
@@ -105,8 +112,8 @@ let G = null, screen = 'title';
 function newGame(seed) {
   const a = playArea(), portrait = a.h >= a.w, long = Math.min(2, Math.max(1, (portrait ? a.h / a.w : a.w / a.h)));
   G = { seed, rng: mulberry32(seed), tick: 0, t: 0, portrait, W: portrait ? CFG.short : CFG.short * long, H: portrait ? CFG.short * long : CFG.short,
-    stations: [], byId: {}, lines: [], ships: [], stLines: {}, delivered: 0, boosts: 3, stabs: 2, nid: 100,
-    stationT: CFG.stationEvery, regenT: CFG.boostRegen, over: false, undo: [], speed: 1, paused: false,
+    stations: [], byId: {}, lines: [], ships: [], stLines: {}, delivered: 0, boosts: 4, stabs: 2, nid: 100, lineSlots: CFG.baseLines,
+    stationT: CFG.stationStart, regenT: CFG.boostRegen, over: false, undo: [], speed: speedPref, paused: false,
     draw: null, sel: null, armed: null, flips: 0, repaths: 0, transfers: 0, fx: [] };
   addStation('circle', .5, .4); addStation('triangle', .28, .62); addStation('square', .72, .64);
   fit(); refreshRoutes();
@@ -165,7 +172,7 @@ function undo() {
   for (const d of snap) if (d.id in cur) d.energy = cur[d.id];   // undo never refills energy
   G.sel = null; setLines(snap); toast('Undone');
 }
-function freeSlot() { for (let i = 0; i < CFG.maxLines; i++) if (!G.lines.some(l => l.slot === i)) return i; return -1; }
+function freeSlot() { for (let i = 0; i < G.lineSlots; i++) if (!G.lines.some(l => l.slot === i)) return i; return -1; }
 
 // ---------- routing: Dijkstra over (station, line) states; line=null means waiting on the platform ----------
 // Returns the first hop {line, next} (or {alight}) and the destination station, or null if unreachable.
@@ -231,37 +238,39 @@ function arrive(sh) {
     if (r && !(r.line === sh.line && r.next === next)) { sh.pods.splice(i, 1); st.pods.push(p); moved++; G.transfers++; }  // transfer / wait for the return trip
   }
   moved += load(sh, st, next);
-  sh.line.energy = Math.max(0, sh.line.energy - .004 * moved);
+  sh.line.energy = Math.max(0, sh.line.energy - CFG.drainPod * moved);
   sh.dwell = .35 + .08 * moved;
   if (moved) G.dirty = true;
 }
 function deliver(st) {
   G.delivered++; G.fx.push({ x: st.x, y: st.y, t: 0 });
-  if (G.delivered % 6 === 0 && G.boosts < CFG.maxBoosts) G.boosts++;
-  if (G.delivered % 12 === 0 && G.stabs < CFG.maxStabs) G.stabs++;
+  if (G.delivered % CFG.boostPer === 0 && G.boosts < CFG.maxBoosts) G.boosts++;
+  if (G.delivered % CFG.stabPer === 0 && G.stabs < CFG.maxStabs) G.stabs++;
+  if (G.delivered % CFG.linePer === 0 && G.lineSlots < CFG.maxLines) { G.lineSlots++; G.note = 'New line unlocked: ' + G.lineSlots + ' lines'; }
 }
 
 // ---------- fixed-timestep simulation ----------
 function simRunning() { return screen === 'play' && !G.over && !G.draw && !G.sel && !G.paused; }
 function step() {
   G.tick++; G.t = G.tick * STEP;
-  if ((G.stationT -= STEP) <= 0) { G.stationT = CFG.stationEvery; if (G.stations.length < CFG.maxStations) spawnStation(); }
+  if ((G.stationT -= STEP) <= 0) { G.stationT = stationInterval(G.t); if (G.stations.length < CFG.maxStations) spawnStation(); }
   if ((G.regenT -= STEP) <= 0) { G.regenT = CFG.boostRegen; if (G.boosts < CFG.maxBoosts) G.boosts++; }
-  const pace = Math.max(.45, 1 - G.t / 400);
-  for (const st of G.stations) if ((st.podT -= STEP) <= 0) { st.podT = (6 + G.rng() * 6) * pace; spawnPod(st); G.dirty = true; }
+  const pace = Math.max(CFG.podFloor, 1 - G.t / CFG.podRamp);
+  for (const st of G.stations) if ((st.podT -= STEP) <= 0) { st.podT = (CFG.podMin + G.rng() * CFG.podVar) * pace; spawnPod(st); G.dirty = true; }
   for (const st of G.stations) if (st.phase) {               // phase stations
     if (st.freeze > 0) st.freeze = Math.max(0, st.freeze - STEP);
     else if ((st.phase.t -= STEP) <= 0) flip(st);
   }
   for (const sh of G.ships) {
     const l = sh.line;
+    if (sh.pods.length <= CFG.regenLoad) l.energy = Math.min(1, l.energy + CFG.regen * STEP);   // idle / light use recharges slowly
     if (sh.dwell > 0) {
       if ((sh.dwell -= STEP) <= 0) { const nx = nextStop(sh); if (load(sh, G.byId[sh.toId], nx)) G.dirty = true; sh.fromId = sh.toId; sh.toId = nx; sh.d = 0; }
       continue;
     }
     const L = dist(G.byId[sh.fromId], G.byId[sh.toId]);
     sh.d += CFG.speed * speedFactor(l.energy) * STEP;
-    l.energy = Math.max(0, l.energy - (.003 + .006 * l.len / 500) * STEP);   // drain: use + length
+    l.energy = Math.max(0, l.energy - (CFG.drainBase + CFG.drainLen * l.len / 500) * STEP);   // drain: use + length
     if (sh.d >= L) { sh.d = L; arrive(sh); }
   }
   for (const st of G.stations) {
@@ -320,7 +329,7 @@ cv.addEventListener('pointerdown', e => {
   if (k) { const s = k.line.stations.slice(); if (!k.end) s.reverse(); G.draw = { line: k.line, rev: !k.end, path: s, base: s.length, p: w }; return; }
   const st = hitStation(w);
   if (st) {
-    if (freeSlot() < 0) { toast('All 5 lines used: long-press one to delete'); ptr.done = true; return; }
+    if (freeSlot() < 0) { toast('All ' + G.lineSlots + ' lines used: long-press one to delete'); ptr.done = true; return; }
     G.draw = { line: null, path: [st.id], base: 1, p: w }; return;
   }
   ptr.line = hitLine(w);
@@ -371,7 +380,7 @@ $('btnUndo').onclick = undo;
 $('btnDel').onclick = delSel;
 $('btnDone').onclick = () => { G.sel = null; };
 $('btnPause').onclick = () => { if (screen === 'play') G.paused = !G.paused; };
-$('btnSpeed').onclick = () => { G.speed = G.speed % 3 + 1; };
+$('btnSpeed').onclick = () => { G.speed = speedPref = SPEEDS[(SPEEDS.indexOf(G.speed) + 1) % SPEEDS.length]; localStorage.setItem('neonOrbit.speed', speedPref); };
 $('btnStart').onclick = () => { $('title').classList.remove('show'); screen = 'play'; fit(); };
 $('btnRestart').onclick = () => { $('over').classList.remove('show'); newGame(G.seed); };
 $('btnNew').onclick = () => { const s = Math.floor(Math.random() * 1e6); history.replaceState(null, '', '?seed=' + s); $('over').classList.remove('show'); newGame(s); };
@@ -383,12 +392,13 @@ let chipKey = '';
 function ui() {
   if (!G) return;
   $('score').textContent = '◆ ' + G.delivered;
-  $('meta').textContent = 'seed ' + G.seed + ' · ' + fmt(G.t);
+  $('meta').textContent = 'seed ' + G.seed + ' · ' + fmt(G.t) + ' · lines ' + G.lines.length + '/' + G.lineSlots;
   $('btnBoost').textContent = '⚡ ' + G.boosts; $('btnBoost').classList.toggle('on', G.armed === 'boost');
   $('btnStab').textContent = '❄ ' + G.stabs; $('btnStab').classList.toggle('on', G.armed === 'stab');
   $('btnUndo').disabled = !G.undo.length;
   $('btnDel').classList.toggle('hide', !G.sel); $('btnDone').classList.toggle('hide', !G.sel);
-  $('btnPause').textContent = G.paused ? '▶' : '❚❚'; $('btnSpeed').textContent = G.speed + '×';
+  $('btnPause').textContent = G.paused ? '▶' : '❚❚'; $('btnSpeed').textContent = speedLabel(G.speed);
+  if (G.note) { toast(G.note); G.note = null; }
   const key = G.lines.map(l => l.id + ':' + Math.round(l.energy * 100) + (G.sel === l ? 's' : '')).join();
   if (key !== chipKey) {
     chipKey = key; const c = $('chips'); c.innerHTML = '';
@@ -533,6 +543,7 @@ window.__dbg = {
   worldToScreen(p) { return { x: ox + p.x * sc, y: oy + p.y * sc }; },
   addLine(ids) { const defs = lineDefs(); defs.push({ id: G.nid++, slot: freeSlot(), stations: ids, energy: 1 }); editLines(defs); },
   route: (sid, shape) => { const r = route(sid, null, shape); return r && { line: r.line && r.line.id, next: r.next, dest: r.dest }; },
+  defs: () => lineDefs(), edit(defs) { editLines(defs); }, boost(id) { boost(G.lines.find(l => l.id === id)); }, freeSlot: () => freeSlot(),
   knobs: () => knobs().map(k => ({ line: k.line.id, end: k.end, x: ox + k.x * sc, y: oy + k.y * sc })),
 };
 </script>
